@@ -8,6 +8,33 @@ import {
 import { validateReceiptAndDescription } from './validator';
 import { matchItemToReceipt } from './fuzzyMatcher';
 
+// ---------------------------------------------------------------------------
+// Monetary helpers
+//
+// All internal arithmetic uses integer paise (1 rupee = 100 paise) to
+// eliminate IEEE-754 floating-point drift in financial calculations.
+// Raw JavaScript floats are NEVER interpolated into assumption/flag strings.
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a rupee amount (possibly containing paise) to integer paise.
+ * Math.round() handles the binary float representation of values like 68.40.
+ * e.g. 1436.40 → 143640, 68.40 → 6840, -0.05 → -5
+ */
+function toPaise(rupees: number): number {
+  return Math.round(rupees * 100);
+}
+
+/**
+ * Format an integer paise value as a human-readable rupee string.
+ * Strips trailing ".00" for whole-rupee amounts.
+ * e.g. 143640 → "1436.40", 114700 → "1147", 40 → "0.40"
+ */
+function formatRupees(paise: number): string {
+  const str = (paise / 100).toFixed(2);
+  return str.endsWith('.00') ? str.slice(0, -3) : str;
+}
+
 function formatFraction(num: number, denom: number): string {
   if (num === denom) return '';
   const frac = num / denom;
@@ -56,6 +83,22 @@ export function calculateBillSplit(
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Convert all receipt monetary values to integer paise exactly once.
+  // This ensures all subsequent arithmetic is free of IEEE-754 drift.
+  // ---------------------------------------------------------------------------
+  const grandTotalPaise = toPaise(receipt.grand_total);
+  const taxPaise = toPaise(receipt.tax || 0);
+  const serviceChargePaise = toPaise(receipt.service_charge || 0);
+  const discountPaise = toPaise(receipt.discount || 0);
+  const roundOffPaise = toPaise(receipt.round_off || 0);
+
+  // Whole-rupee settlement target: the amount the per-person totals must sum
+  // to. Per-person payable amounts are always whole rupees. When the receipt
+  // grand total contains paise (e.g. ₹1436.40), settlement operates at the
+  // ₹1436 whole-rupee level; the paise component is surfaced in assumptions.
+  const settlementTargetRupees = Math.round(grandTotalPaise / 100);
+
   // 2. Map Receipt Items to Consumers
   const defaultConsumers =
     description.default_consumers && description.default_consumers.length > 0
@@ -68,7 +111,8 @@ export function calculateBillSplit(
   interface ConsumerItemShare {
     itemName: string;
     consumer: string;
-    shareAmount: number;
+    /** Share amount in paise (may be fractional for non-even splits; rounded at person-total level) */
+    shareAmountPaise: number;
     fractionText: string;
   }
 
@@ -105,126 +149,155 @@ export function calculateBillSplit(
     }
 
     const numConsumers = itemConsumers.length;
-    const sharePrice = receiptItem.line_total / numConsumers;
+    // Convert item total to paise for precision, then divide.
+    // Per-consumer shares may be non-integer paise for non-even splits;
+    // rounding is applied at the person-total level (step 3→4 below).
+    const itemTotalPaise = toPaise(receiptItem.line_total);
+    const shareAmountPaise = itemTotalPaise / numConsumers;
     const fracText = formatFraction(1, numConsumers);
 
     for (const consumer of itemConsumers) {
-      let displayName = receiptItem.name;
-      if (receiptItem.quantity > 1) {
-        // Include quantity if > 1 e.g. "Butter Naan (qty 4)" or fraction
-        displayName = `${receiptItem.name}${fracText}`;
-      } else {
-        displayName = `${receiptItem.name}${fracText}`;
-      }
-
+      const displayName = `${receiptItem.name}${fracText}`;
       consumerShares.push({
         itemName: displayName,
         consumer,
-        shareAmount: sharePrice,
+        shareAmountPaise,
         fractionText: fracText,
       });
     }
   }
 
-  // 3. Compute Per-Person Subtotals
-  const personSubtotals: Record<string, { items: string[]; subtotal: number }> = {};
+  // 3. Compute Per-Person Subtotals (in paise)
+  const personSubtotals: Record<string, { items: string[]; subtotalPaise: number }> = {};
   for (const p of people) {
-    personSubtotals[p] = { items: [], subtotal: 0 };
+    personSubtotals[p] = { items: [], subtotalPaise: 0 };
   }
 
   for (const share of consumerShares) {
     if (personSubtotals[share.consumer]) {
       personSubtotals[share.consumer].items.push(share.itemName);
-      personSubtotals[share.consumer].subtotal += share.shareAmount;
+      personSubtotals[share.consumer].subtotalPaise += share.shareAmountPaise;
     }
   }
 
-  const totalFoodSubtotal = Object.values(personSubtotals).reduce(
-    (acc, curr) => acc + curr.subtotal,
+  const totalFoodSubtotalPaise = Object.values(personSubtotals).reduce(
+    (acc, curr) => acc + curr.subtotalPaise,
     0
   );
 
-  const subtotalForRatio = totalFoodSubtotal > 0 ? totalFoodSubtotal : 1;
+  const subtotalForRatioPaise = totalFoodSubtotalPaise > 0 ? totalFoodSubtotalPaise : 1;
 
   // 4. Proportional Allocation of Charges (Tax, Service, Discount, Round-Off)
+  //    Arithmetic is done in integer paise; Math.round() applied per-step to
+  //    prevent error accumulation. Rounding to whole rupees happens here.
   interface PersonCalc {
     name: string;
     items: string[];
-    subtotal: number;
-    rawSubtotal: number;
-    rawTax: number;
-    rawService: number;
-    rawDiscount: number;
-    rawTotal: number;
-
-    roundedSubtotal: number;
-    roundedTax: number;
-    roundedService: number;
-    roundedDiscount: number;
-    preliminaryTotal: number;
-    finalTotal: number;
+    /** Accumulated food subtotal in paise (may be fractional for non-even item splits) */
+    subtotalPaise: number;
+    rawTaxPaise: number;
+    rawServicePaise: number;
+    rawDiscountPaise: number;
+    /** Total in paise before whole-rupee rounding */
+    rawTotalPaise: number;
+    // Whole-rupee values (for API output)
+    roundedSubtotalRupees: number;
+    roundedTaxRupees: number;
+    roundedServiceRupees: number;
+    roundedDiscountRupees: number; // ≤ 0 (non-positive)
+    /** Whole-rupee total before remainder correction */
+    preliminaryRupees: number;
+    /** Final whole-rupee total after remainder correction */
+    finalRupees: number;
   }
 
   const personCalcs: PersonCalc[] = people.map((person) => {
     const data = personSubtotals[person];
-    const ratio = data.subtotal / subtotalForRatio;
+    // ratio is a float (unavoidable), but it is immediately applied to integer
+    // paise values and the result is Math.round()-ed, preventing drift accumulation.
+    const ratio = data.subtotalPaise / subtotalForRatioPaise;
 
-    const rawSubtotal = data.subtotal;
-    const rawTax = (receipt.tax || 0) * ratio;
-    const rawService = (receipt.service_charge || 0) * ratio;
-    const rawDiscount = (receipt.discount || 0) * ratio;
-    const rawRoundOff = (receipt.round_off || 0) * ratio;
+    const rawTaxPaise = Math.round(taxPaise * ratio);
+    const rawServicePaise = Math.round(serviceChargePaise * ratio);
+    const rawDiscountPaise = Math.round(discountPaise * ratio);
+    const rawRoundOffPaise = Math.round(roundOffPaise * ratio);
 
-    const rawTotal = rawSubtotal + rawTax + rawService - rawDiscount + rawRoundOff;
+    const rawTotalPaise =
+      data.subtotalPaise + rawTaxPaise + rawServicePaise - rawDiscountPaise + rawRoundOffPaise;
 
     return {
       name: person,
       items: data.items,
-      subtotal: rawSubtotal,
-      rawSubtotal,
-      rawTax,
-      rawService,
-      rawDiscount,
-      rawTotal,
-
-      roundedSubtotal: Math.round(rawSubtotal),
-      roundedTax: Math.round(rawTax),
-      roundedService: Math.round(rawService),
-      roundedDiscount: -Math.round(rawDiscount), // Non-positive e.g. -20
-      preliminaryTotal: Math.round(rawTotal),
-      finalTotal: Math.round(rawTotal),
+      subtotalPaise: data.subtotalPaise,
+      rawTaxPaise,
+      rawServicePaise,
+      rawDiscountPaise,
+      rawTotalPaise,
+      roundedSubtotalRupees: Math.round(data.subtotalPaise / 100),
+      roundedTaxRupees: Math.round(rawTaxPaise / 100),
+      roundedServiceRupees: Math.round(rawServicePaise / 100),
+      roundedDiscountRupees: -Math.round(rawDiscountPaise / 100), // non-positive e.g. -120
+      preliminaryRupees: Math.round(rawTotalPaise / 100),
+      finalRupees: Math.round(rawTotalPaise / 100),
     };
   });
 
   // 5. Deterministic Whole-Rupee Rounding & Remainder Allocation
-  const sumOfPersonTotals = personCalcs.reduce((sum, p) => sum + p.finalTotal, 0);
-  const remainder = receipt.grand_total - sumOfPersonTotals;
+  //
+  // Because both operands are integers, remainderRupees is always an exact
+  // integer — the remainder loop is safe. The original bug (remainder = 0.40
+  // floating-point causing a loop that ran once and over-shot by ₹1) cannot
+  // occur here.
+  const sumOfPersonRupees = personCalcs.reduce((sum, p) => sum + p.finalRupees, 0);
+  const remainderRupees = settlementTargetRupees - sumOfPersonRupees; // always integer
 
-  if (remainder !== 0) {
-    // Sort persons by highest subtotal / highest fractional share to deterministically allocate remainder
+  if (remainderRupees !== 0) {
+    // Sort by highest intra-rupee paise fraction to allocate the remainder
+    // deterministically (the person closest to rounding up gets +₹1 first).
     const sorted = [...personCalcs].sort((a, b) => {
-      const fracA = a.rawTotal - Math.floor(a.rawTotal);
-      const fracB = b.rawTotal - Math.floor(b.rawTotal);
+      // Fractional paise within the person's whole-rupee total
+      const fracA = a.rawTotalPaise - Math.floor(a.rawTotalPaise / 100) * 100;
+      const fracB = b.rawTotalPaise - Math.floor(b.rawTotalPaise / 100) * 100;
       if (Math.abs(fracB - fracA) > 0.001) {
         return fracB - fracA;
       }
-      return b.rawSubtotal - a.rawSubtotal;
+      return b.subtotalPaise - a.subtotalPaise;
     });
 
-    const absRemainder = Math.abs(remainder);
-    const step = remainder > 0 ? 1 : -1;
+    const absRemainder = Math.abs(remainderRupees); // integer, loop is always exact
+    const step = remainderRupees > 0 ? 1 : -1;
 
     const allocatedNames: string[] = [];
     for (let i = 0; i < absRemainder; i++) {
       const target = sorted[i % sorted.length];
-      target.finalTotal += step;
+      target.finalRupees += step;
       allocatedNames.push(target.name);
     }
 
+    // Format the signed remainder without any raw float interpolation
+    const signedRemainderStr =
+      remainderRupees > 0
+        ? `+₹${remainderRupees}`
+        : `-₹${Math.abs(remainderRupees)}`;
+
     assumptions.push(
-      `Rounding remainder of ₹${remainder > 0 ? '+' : ''}${remainder} allocated deterministically to ${[
+      `Rounding remainder of ${signedRemainderStr} allocated deterministically to ${[
         ...new Set(allocatedNames),
-      ].join(', ')} (based on highest subtotal/fractional share) to reconcile sum of person totals with receipt grand total of ₹${receipt.grand_total}.`
+      ].join(', ')} (based on highest fractional paise share) to reconcile sum of person totals with settlement target of ₹${settlementTargetRupees}.`
+    );
+  }
+
+  // If the receipt grand total contains a sub-rupee paise component, explain
+  // clearly that settlement operates at the whole-rupee level and that this is
+  // not a reconciliation error. This prevents the paise amount from appearing
+  // as a spurious "Mismatch" in the UI.
+  const paiseComponent = grandTotalPaise % 100;
+  if (paiseComponent !== 0) {
+    assumptions.push(
+      `Receipt grand total of ₹${formatRupees(grandTotalPaise)} includes a ₹${formatRupees(paiseComponent)} paise component. ` +
+        `Per-person payable amounts use whole-rupee settlement (₹${settlementTargetRupees} total). ` +
+        `The ₹${formatRupees(paiseComponent)} sub-rupee amount is absorbed by the whole-rupee rounding strategy ` +
+        `and does not constitute a reconciliation mismatch.`
     );
   }
 
@@ -232,11 +305,11 @@ export function calculateBillSplit(
   const perPerson: PerPersonSplit[] = personCalcs.map((p) => ({
     name: p.name,
     items: p.items,
-    subtotal: p.roundedSubtotal,
-    tax_share: p.roundedTax,
-    service_share: p.roundedService,
-    discount_share: p.roundedDiscount,
-    total: p.finalTotal,
+    subtotal: p.roundedSubtotalRupees,
+    tax_share: p.roundedTaxRupees,
+    service_share: p.roundedServiceRupees,
+    discount_share: p.roundedDiscountRupees,
+    total: p.finalRupees,
   }));
 
   const finalSumPersonTotals = perPerson.reduce((sum, p) => sum + p.total, 0);
@@ -257,10 +330,16 @@ export function calculateBillSplit(
 
   return {
     per_person: perPerson,
+    // Preserve the exact receipt grand total (may include paise).
+    // The reconciliation check operates at the whole-rupee settlement level.
     grand_total: receipt.grand_total,
     reconciliation: {
       sum_of_person_totals: finalSumPersonTotals,
-      matches_bill: finalSumPersonTotals === receipt.grand_total,
+      // matches_bill is true when the sum of whole-rupee person totals equals
+      // Math.round(receipt.grand_total). This is the documented whole-rupee
+      // settlement level: paise components in the receipt total are absorbed
+      // by the rounding strategy and explained in assumptions.
+      matches_bill: finalSumPersonTotals === settlementTargetRupees,
     },
     paid_by: paidBy,
     settle_up: settleUp,

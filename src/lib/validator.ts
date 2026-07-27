@@ -6,12 +6,28 @@ export interface ValidationResult {
   assumptions: string[];
 }
 
+// Pattern used in LLM prompt Rule 4 when it cannot match a description item to the receipt.
+// We promote these to flags because they represent semantic inconsistencies, not just
+// interpretive decisions.
+const LLM_NOT_FOUND_PATTERN = /not found on the receipt/i;
+
 export function validateReceiptAndDescription(
   receipt: ReceiptData,
   description: DescriptionData
 ): ValidationResult {
   const flags: string[] = [];
-  const assumptions: string[] = [...(description.assumptions || [])];
+  // Separate LLM-supplied assumptions into flags vs genuine assumptions
+  const assumptions: string[] = [];
+
+  for (const asm of description.assumptions || []) {
+    if (LLM_NOT_FOUND_PATTERN.test(asm)) {
+      // Promote: a description item that cannot be matched to the receipt is a WARNING,
+      // not merely an interpretive assumption.
+      flags.push(`⚠ ${asm}`);
+    } else {
+      assumptions.push(asm);
+    }
+  }
 
   // 1. Receipt Validation
   if (!receipt.items || receipt.items.length === 0) {
@@ -54,14 +70,16 @@ export function validateReceiptAndDescription(
     flags.push(`Stated payer '${description.payer}' is not listed among the participants.`);
   }
 
-  // 3. Mapping Validation
+  // 3. Mapping Validation: flag any item_allocation entries that cannot be matched to the receipt.
+  // This handles the case where the LLM still places an unmatched item into item_allocations
+  // despite the prompt instruction.
   const validPeopleLower = (description.people || []).map((p) => p.toLowerCase());
 
   for (const alloc of description.item_allocations || []) {
     const matched = matchItemToReceipt(alloc.item_name, receipt.items || []);
     if (!matched) {
       flags.push(
-        `Description item '${alloc.item_name}' could not be matched to any receipt line item.`
+        `Description references item '${alloc.item_name}' which could not be matched to any receipt line item. This allocation was excluded from the split.`
       );
     }
 

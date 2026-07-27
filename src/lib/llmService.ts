@@ -1,6 +1,11 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { ReceiptData, DescriptionData } from '../types';
 
+// Transient HTTP status codes that are safe to retry (provider overload, rate limit)
+const RETRYABLE_STATUS_CODES = new Set([429, 503, 502, 504]);
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1200;
+
 function getApiKey(): string {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'your_gemini_api_key_here') {
@@ -21,8 +26,36 @@ function cleanJsonResponse(rawText: string): string {
   return text.trim();
 }
 
+function isRetryableError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  // Gemini SDK surfaces HTTP status in message e.g. "[429 Too Many Requests]"
+  for (const code of RETRYABLE_STATUS_CODES) {
+    if (msg.includes(`${code}`)) return true;
+  }
+  return false;
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  attempts = MAX_RETRIES
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableError(err) || i === attempts) break;
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 /**
- * Step 1: Extracts structured receipt data from base64 receipt image using Gemini Multimodal LLM
+ * Step 1: Extracts structured receipt data from base64 receipt image using Gemini Multimodal LLM.
+ * Model: gemini-3.5-flash-lite (supports multimodal image input + JSON mode)
  */
 export async function extractReceiptData(
   receiptBase64: string,
@@ -31,7 +64,7 @@ export async function extractReceiptData(
   const apiKey = getApiKey();
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.5-flash-lite',
     generationConfig: { responseMimeType: 'application/json' },
   });
 
@@ -62,6 +95,9 @@ Rules:
 - Extract subtotal, service charge, tax (GST/VAT), discount, tip, round-off, and grand total if present.
 - Default missing numeric fields to 0.
 - Do NOT perform arithmetic corrections on extracted numbers; output exact printed values.
+- CRITICAL — Decimal precision: NEVER round or truncate monetary values. Preserve every decimal digit exactly as printed on the receipt. A printed value of 68.40 MUST be output as 68.40 (not 68 or 68.4 rounded further). A printed grand total of 1436.40 MUST be output as 1436.40 (not 1436).
+- CRITICAL — Paise values: Indian receipts frequently contain paise (sub-rupee amounts). If a field reads "68.40" or "1436.40", the decimal portion is paise and must be preserved numerically as-is.
+- CRITICAL — grand_total: Copy the printed grand total exactly. Do not re-derive or recalculate it.
 - Output ONLY valid raw JSON. No explanations, no markdown wrapping.`;
 
   const imagePart = {
@@ -71,29 +107,92 @@ Rules:
     },
   };
 
-  const result = await model.generateContent([prompt, imagePart]);
-  const responseText = result.response.text();
+  const responseText = await withRetry(async () => {
+    const result = await model.generateContent([prompt, imagePart]);
+    return result.response.text();
+  });
+
   const cleaned = cleanJsonResponse(responseText);
 
   try {
     const parsed = JSON.parse(cleaned) as ReceiptData;
-    return {
+
+    // ---------------------------------------------------------------------------
+    // Post-extraction deterministic grand-total correction.
+    //
+    // The LLM occasionally drops the decimal component of a printed grand total
+    // (e.g. extracting 1436 instead of 1436.40). To guard against this, we
+    // deterministically recompute the expected total from the component fields
+    // using integer paise arithmetic (same strategy as calcEngine.ts) and
+    // correct grand_total if the extracted value differs by more than ₹0.01.
+    //
+    // This correction is NEVER performed by the LLM — it is application-layer
+    // arithmetic on already-extracted integer/decimal fields.
+    // ---------------------------------------------------------------------------
+    const toPaise = (rupees: number): number => Math.round(rupees * 100);
+
+    const subtotalPaise    = toPaise(parsed.subtotal        || 0);
+    const taxPaise         = toPaise(parsed.tax             || 0);
+    const serviceChargePaise = toPaise(parsed.service_charge || 0);
+    const discountPaise    = toPaise(parsed.discount        || 0);
+    const tipPaise         = toPaise(parsed.tip             || 0);
+    const roundOffPaise    = toPaise(parsed.round_off       || 0);
+
+    // expected = subtotal + tax + service + tip + round_off - discount
+    const recomputedPaise =
+      subtotalPaise + taxPaise + serviceChargePaise + tipPaise + roundOffPaise - discountPaise;
+
+    const extractedGrandTotalPaise = toPaise(parsed.grand_total || 0);
+
+    // Determine which grand_total to use and whether a correction flag is needed.
+    let finalGrandTotal = parsed.grand_total || 0;
+    const correctionFlags: string[] = [];
+
+    // Tolerate up to 1 paise of floating-point drift; anything larger triggers correction.
+    if (Math.abs(recomputedPaise - extractedGrandTotalPaise) > 1) {
+      const recomputedRupees = recomputedPaise / 100;
+      // Format without trailing ".00" for clean display
+      const fmt = (n: number) => {
+        const s = n.toFixed(2);
+        return s.endsWith('.00') ? s.slice(0, -3) : s;
+      };
+      correctionFlags.push(
+        `Extracted grand total ₹${fmt(parsed.grand_total || 0)} did not match component arithmetic ` +
+        `(subtotal ₹${fmt((parsed.subtotal || 0))} + tax ₹${fmt((parsed.tax || 0))} ` +
+        `+ service ₹${fmt((parsed.service_charge || 0))} − discount ₹${fmt((parsed.discount || 0))} ` +
+        `+ round-off ₹${fmt((parsed.round_off || 0))} = ₹${fmt(recomputedRupees)}). ` +
+        `Grand total corrected to ₹${fmt(recomputedRupees)} by deterministic component arithmetic.`
+      );
+      finalGrandTotal = recomputedRupees;
+    }
+
+    const receiptData: ReceiptData & { _extractionFlags?: string[] } = {
       items: parsed.items || [],
-      subtotal: parsed.subtotal || 0,
-      service_charge: parsed.service_charge || 0,
-      tax: parsed.tax || 0,
-      discount: parsed.discount || 0,
-      tip: parsed.tip || 0,
-      round_off: parsed.round_off || 0,
-      grand_total: parsed.grand_total || 0,
+      subtotal:       parsed.subtotal        || 0,
+      service_charge: parsed.service_charge  || 0,
+      tax:            parsed.tax             || 0,
+      discount:       parsed.discount        || 0,
+      tip:            parsed.tip             || 0,
+      round_off:      parsed.round_off       || 0,
+      grand_total:    finalGrandTotal,
     };
+
+    // Attach correction flags so the API route can merge them into the response.
+    if (correctionFlags.length > 0) {
+      receiptData._extractionFlags = correctionFlags;
+    }
+
+    return receiptData;
   } catch (err) {
-    throw new Error(`Failed to parse receipt JSON from LLM output: ${(err as Error).message}\nOutput: ${responseText}`);
+    throw new Error(
+      `Failed to parse receipt JSON from LLM output: ${(err as Error).message}\nOutput: ${responseText}`
+    );
   }
 }
 
 /**
- * Step 2: Interprets natural language description into structured consumption rules
+ * Step 2: Interprets natural language description into structured consumption rules.
+ * Model: gemini-3.5-flash-lite (text-only, structured JSON output)
  */
 export async function interpretDescription(
   description: string,
@@ -102,7 +201,7 @@ export async function interpretDescription(
   const apiKey = getApiKey();
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
-    model: 'gemini-3.6-flash',
+    model: 'gemini-3.5-flash-lite',
     generationConfig: { responseMimeType: 'application/json' },
   });
 
@@ -136,13 +235,17 @@ Return a JSON object conforming EXACTLY to this schema:
 Rules:
 1. Extract all named participants in the "people" array.
 2. Identify who paid in the "payer" field. If unstated or ambiguous, return null for "payer".
-3. Map specific items mentioned in description to "item_allocations". Match "item_name" as closely as possible to the receipt items above.
-4. If statements like "everything else common to all" or "shared among all" exist, set "default_consumers" to all participants.
-5. Record any defensible interpretations in "assumptions".
-6. Output ONLY valid raw JSON. No markdown wrappers.`;
+3. For "item_allocations", ONLY include items that can be matched to the Receipt Items Available list above. Do NOT invent items that are not on the receipt.
+4. If the description references an item that does NOT appear in the receipt list, do NOT include it in "item_allocations". Instead, record it in "assumptions" as: "Item '[name]' mentioned in description was not found on the receipt and was excluded."
+5. If statements like "everything else common to all" or "shared among all" exist, set "default_consumers" to all participants.
+6. Record any defensible interpretations in "assumptions".
+7. Output ONLY valid raw JSON. No markdown wrappers.`;
 
-  const result = await model.generateContent(prompt);
-  const responseText = result.response.text();
+  const responseText = await withRetry(async () => {
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  });
+
   const cleaned = cleanJsonResponse(responseText);
 
   try {
@@ -155,6 +258,8 @@ Rules:
       assumptions: parsed.assumptions || [],
     };
   } catch (err) {
-    throw new Error(`Failed to parse description JSON from LLM output: ${(err as Error).message}\nOutput: ${responseText}`);
+    throw new Error(
+      `Failed to parse description JSON from LLM output: ${(err as Error).message}\nOutput: ${responseText}`
+    );
   }
 }

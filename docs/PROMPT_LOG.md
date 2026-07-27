@@ -1,21 +1,41 @@
 # Prompt Log & Architectural Iterations
 
+## Model Configuration
+
+- **Active Model**: `gemini-3.5-flash-lite` (via `@google/generative-ai` SDK with `responseMimeType: "application/json"`).
+
+---
+
 ## Iteration 1: Initial System Implementation
 
 ### Objectives & Prompt Goal
-Implement "Fair Split" MVP according to hiring assignment specifications:
 - Base64 receipt image + plain-English description input.
-- Strict API contract (`POST /api/split`) returning `per_person`, `grand_total`, `reconciliation`, `paid_by`, `settle_up`, `assumptions`, and `flags`.
-- Multimodal LLM (Gemini 1.5 Flash) handles semantic interpretation (receipt extraction & description parsing).
-- Pure TypeScript calculation engine handles all currency math, proportional splits, rounding remainder allocation, and settle-up logic.
+- Strict API contract (`POST /api/split`).
+- Multimodal LLM extracts structured receipt data and interprets consumption rules.
+- TypeScript engine handles financial calculations, proportional allocations, whole-rupee settlement, and settle-up.
 
-### Key Architectural Decisions
-1. **Separation of LLM & Financial Logic**:
-   - LLMs output structured JSON (`ReceiptData`, `DescriptionData`).
-   - `calcEngine.ts` executes all financial allocation deterministically in application code to eliminate LLM arithmetic drift.
+### Prompt Strategy
+1. **Receipt Extraction Prompt**:
+   - Instructs the model to extract exact item names, quantities, line totals, subtotal, tax, service charge, discount, tip, round-off, and grand total.
+   - Outputs strict raw JSON conforming to `ReceiptData`.
 
-2. **Deterministic Rounding Allocation**:
-   - Rounding remainders are assigned based on fractional remainder / highest subtotal ordering and logged transparently in `assumptions`.
+2. **Description Interpretation Prompt**:
+   - Accepts available receipt items and description text.
+   - Extracts participants (`people`), designated `payer`, explicit `item_allocations`, `default_consumers`, and `assumptions`.
 
-3. **Validation Layer**:
-   - Checks OCR extraction arithmetic and fuzzy item matching before computation, generating explicit `flags` when ambiguities occur.
+---
+
+## Iteration 2: Robust Edge Case & Precision Enhancements
+
+### Prompt Enhancements
+1. **Unmatched Description Items**:
+   - Instructed the model to exclude unmatched items from `item_allocations` and record them as explicit assumption patterns, allowing `validator.ts` to promote them to warning `flags`.
+
+2. **Decimal & Paise Preservation Rules**:
+   - Explicit prompt rules added to `extractReceiptData`:
+     - *NEVER round or truncate monetary values.*
+     - *Preserve every decimal digit exactly as printed.*
+     - *Indian receipt paise amounts (e.g. 68.40, 1436.40) must be preserved numerically as-is.*
+
+3. **Deterministic Guard Rail (Application Layer)**:
+   - Added application-layer post-extraction component arithmetic check (`subtotal + tax + service + tip + round_off - discount`). If the LLM drops decimal paise from `grand_total`, the application layer deterministically corrects `grand_total` and logs an extraction correction flag.

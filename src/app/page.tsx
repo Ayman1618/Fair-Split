@@ -11,142 +11,8 @@ import {
   ArrowRight,
   Sparkles,
   RefreshCw,
-  FileText,
 } from 'lucide-react';
 import { ApiSplitResponse } from '@/types';
-import { calculateBillSplit } from '@/lib/calcEngine';
-
-// Sample Fixtures for quick demo testing
-const FIXTURES = [
-  {
-    id: 'R1',
-    label: 'R1: 3 People (Ravi, Neha, Sameer)',
-    receipt: {
-      items: [
-        { name: 'Cappuccino', quantity: 1, line_total: 180 },
-        { name: 'Grilled Chicken Sandwich', quantity: 1, line_total: 260 },
-        { name: 'Penne Arrabiata', quantity: 1, line_total: 320 },
-        { name: 'Fresh Lime Soda', quantity: 1, line_total: 120 },
-        { name: 'Brownie', quantity: 1, line_total: 160 },
-      ],
-      subtotal: 1040,
-      service_charge: 52,
-      tax: 54.6,
-      discount: 0,
-      round_off: 0.4,
-      grand_total: 1147,
-    },
-    description:
-      'Three of us: Ravi, Neha, Sameer. Ravi had the cappuccino and sandwich. Neha had pasta and lime soda. Sameer had the brownie. Sameer paid.',
-    descData: {
-      people: ['Ravi', 'Neha', 'Sameer'],
-      payer: 'Sameer',
-      item_allocations: [
-        { item_name: 'Cappuccino', consumers: ['Ravi'] },
-        { item_name: 'Grilled Chicken Sandwich', consumers: ['Ravi'] },
-        { item_name: 'Penne Arrabiata', consumers: ['Neha'] },
-        { item_name: 'Fresh Lime Soda', consumers: ['Neha'] },
-        { item_name: 'Brownie', consumers: ['Sameer'] },
-      ],
-      default_consumers: ['Ravi', 'Neha', 'Sameer'],
-      assumptions: [],
-    },
-  },
-  {
-    id: 'R2',
-    label: 'R2: 4 People (Aman, Priya, Karan, Sara)',
-    receipt: {
-      items: [
-        { name: 'Paneer Butter Masala', quantity: 1, line_total: 320 },
-        { name: 'Dal Makhani', quantity: 1, line_total: 260 },
-        { name: 'Butter Naan', quantity: 4, line_total: 240 },
-        { name: 'Jeera Rice', quantity: 1, line_total: 180 },
-        { name: 'Gulab Jamun', quantity: 2, line_total: 120 },
-        { name: 'Masala Papad', quantity: 2, line_total: 100 },
-      ],
-      subtotal: 1220,
-      service_charge: 61,
-      tax: 64.05,
-      discount: 0,
-      round_off: -0.05,
-      grand_total: 1345,
-    },
-    description:
-      'Four of us: Aman, Priya, Karan, Sara. The Gulab Jamun was shared just by Priya and Karan. Everything else was common to all four. Priya paid.',
-    descData: {
-      people: ['Aman', 'Priya', 'Karan', 'Sara'],
-      payer: 'Priya',
-      item_allocations: [
-        { item_name: 'Gulab Jamun', consumers: ['Priya', 'Karan'] },
-      ],
-      default_consumers: ['Aman', 'Priya', 'Karan', 'Sara'],
-      assumptions: [],
-    },
-  },
-  {
-    id: 'R3',
-    label: 'R3: 3 People (Ishaan, Meera, Rohit)',
-    receipt: {
-      items: [
-        { name: 'Margherita Pizza', quantity: 1, line_total: 380 },
-        { name: 'Arrabiata Pasta', quantity: 1, line_total: 340 },
-        { name: 'Garlic Bread', quantity: 1, line_total: 160 },
-        { name: 'Craft Beer', quantity: 2, line_total: 500 },
-        { name: 'Virgin Mojito', quantity: 1, line_total: 180 },
-      ],
-      subtotal: 1560,
-      service_charge: 78,
-      tax: 81.9,
-      discount: 0,
-      round_off: 0.1,
-      grand_total: 1720,
-    },
-    description:
-      'Ishaan, Meera, Rohit. Pizza, pasta, garlic bread shared by all. Two beers consumed by Ishaan and Rohit only. Mojito by Meera. Rohit paid.',
-    descData: {
-      people: ['Ishaan', 'Meera', 'Rohit'],
-      payer: 'Rohit',
-      item_allocations: [
-        { item_name: 'Craft Beer', consumers: ['Ishaan', 'Rohit'] },
-        { item_name: 'Virgin Mojito', consumers: ['Meera'] },
-      ],
-      default_consumers: ['Ishaan', 'Meera', 'Rohit'],
-      assumptions: [],
-    },
-  },
-  {
-    id: 'R4',
-    label: 'R4: 4 People (Dev, Nikhil, Anjali, Farah - Discount)',
-    receipt: {
-      items: [
-        { name: 'Chicken Biryani', quantity: 2, line_total: 560 },
-        { name: 'Veg Biryani', quantity: 1, line_total: 240 },
-        { name: 'Mutton Rogan Josh', quantity: 1, line_total: 420 },
-        { name: 'Raita', quantity: 2, line_total: 120 },
-        { name: 'Soft Drinks', quantity: 3, line_total: 180 },
-      ],
-      subtotal: 1520,
-      discount: 228,
-      service_charge: 76,
-      tax: 68.4,
-      round_off: -0.4,
-      grand_total: 1436,
-    },
-    description:
-      'Dev, Nikhil, Anjali, Farah. Dev and Nikhil each consumed one chicken biryani. Anjali consumed veg biryani. Farah consumed rogan josh. Raita and soft drinks shared by all four. Anjali paid.',
-    descData: {
-      people: ['Dev', 'Nikhil', 'Anjali', 'Farah'],
-      payer: 'Anjali',
-      item_allocations: [
-        { item_name: 'Chicken Biryani', consumers: ['Dev', 'Nikhil'] },
-        { item_name: 'Veg Biryani', consumers: ['Anjali'] },
-        { item_name: 'Mutton Rogan Josh', consumers: ['Farah'] },
-      ],
-      default_consumers: ['Dev', 'Nikhil', 'Anjali', 'Farah'],
-      assumptions: [],
-    },
-  },
-];
 
 export default function HomePage() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -174,16 +40,12 @@ export default function HomePage() {
     }
   };
 
-  const handlePresetSelect = (fixture: typeof FIXTURES[0]) => {
-    setDescription(fixture.description);
-    // Instant client-side computation for preset testing
-    const computed = calculateBillSplit(fixture.receipt, fixture.descData);
-    setResult(computed);
-    setErrorMsg(null);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Clear any previous result and error BEFORE a new request so stale data
+    // is never shown alongside a new submission attempt.
+    setResult(null);
     setErrorMsg(null);
 
     if (!description.trim()) {
@@ -192,7 +54,7 @@ export default function HomePage() {
     }
 
     if (!base64Image) {
-      setErrorMsg('Please upload a receipt image or select a preset bill.');
+      setErrorMsg('Please upload a receipt image.');
       return;
     }
 
@@ -223,7 +85,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 font-sans">
-      {/* Top Navigation / Brand Banner */}
+      {/* Top Navigation */}
       <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
@@ -240,47 +102,19 @@ export default function HomePage() {
             </div>
           </div>
           <div className="text-xs text-slate-400 hidden sm:block">
-            AI interprets receipts & descriptions • Application code calculates money
+            AI interprets receipts &amp; descriptions • Application code calculates money
           </div>
         </div>
       </header>
 
       {/* Main Workspace Grid */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Preset Selector Banner */}
-        <div className="mb-8 p-4 bg-slate-900/80 border border-slate-800 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div className="flex items-center space-x-3">
-            <Sparkles className="w-5 h-5 text-emerald-400 shrink-0" />
-            <div>
-              <h2 className="text-sm font-semibold text-slate-200">
-                Test Fixture Presets (R1 – R4)
-              </h2>
-              <p className="text-xs text-slate-400">
-                Click any preset to test the deterministic calculation engine instantly:
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {FIXTURES.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => handlePresetSelect(f)}
-                className="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5"
-              >
-                <FileText className="w-3.5 h-3.5 text-emerald-400" />
-                {f.id}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left Column: Form & Inputs */}
-          <div className="lg:col-span-5 space-y-6">
-            <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="lg:col-span-5 space-y-5">
+            <form onSubmit={handleSubmit} className="space-y-5">
               {/* Receipt Upload Box */}
-              <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <label className="block text-sm font-semibold text-slate-200 flex items-center gap-2">
                   <Receipt className="w-4 h-4 text-emerald-400" />
                   1. Receipt Image
@@ -289,7 +123,7 @@ export default function HomePage() {
                 <div
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={handleDrop}
-                  className="border-2 border-dashed border-slate-700 hover:border-emerald-500/50 bg-slate-950/40 rounded-xl p-6 text-center cursor-pointer transition-colors"
+                  className="border-2 border-dashed border-slate-700 hover:border-emerald-500/50 bg-slate-950/40 rounded-xl p-6 text-center cursor-pointer transition-colors min-h-[140px] flex items-center justify-center"
                 >
                   {imagePreview ? (
                     <div className="space-y-3">
@@ -313,7 +147,7 @@ export default function HomePage() {
                     <label className="cursor-pointer space-y-2 block">
                       <Upload className="w-8 h-8 mx-auto text-slate-400" />
                       <span className="text-sm text-slate-300 font-medium block">
-                        Drag & drop receipt image or click to upload
+                        Drag &amp; drop receipt image or click to upload
                       </span>
                       <span className="text-xs text-slate-500 block">
                         Supports PNG, JPG, WEBP
@@ -334,15 +168,15 @@ export default function HomePage() {
               </div>
 
               {/* Description Input Textarea */}
-              <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <label className="block text-sm font-semibold text-slate-200 flex items-center gap-2">
                   <Users className="w-4 h-4 text-emerald-400" />
-                  2. Consumption & Payer Description
+                  2. Consumption &amp; Payer Description
                 </label>
                 <textarea
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  rows={4}
+                  rows={6}
                   placeholder="e.g. Four of us: Aman, Priya, Karan, Sara. The Gulab Jamun was shared just by Priya and Karan. Everything else was common to all four. Priya paid."
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 resize-y"
                 />
@@ -364,7 +198,7 @@ export default function HomePage() {
                 {loading ? (
                   <>
                     <RefreshCw className="w-5 h-5 animate-spin" />
-                    Extracting & Calculating Split...
+                    Extracting &amp; Calculating Split...
                   </>
                 ) : (
                   <>
@@ -378,22 +212,90 @@ export default function HomePage() {
 
           {/* Right Column: Output / Dashboard */}
           <div className="lg:col-span-7 space-y-6">
-            {!result ? (
+            {loading ? (
               <div className="h-full min-h-[400px] border border-dashed border-slate-800 rounded-2xl bg-slate-900/20 p-8 flex flex-col items-center justify-center text-center">
-                <Receipt className="w-12 h-12 text-slate-600 mb-3" />
+                <RefreshCw className="w-10 h-10 text-emerald-500 animate-spin mb-4" />
                 <h3 className="text-base font-semibold text-slate-300">
-                  Ready to Split
+                  Analysing receipt &amp; description…
                 </h3>
                 <p className="text-xs text-slate-500 max-w-sm mt-1">
-                  Upload a receipt image and enter a description, or select one of the
-                  test fixture presets above to calculate a split.
+                  Extracting line items via AI, then calculating the split deterministically.
                 </p>
               </div>
+            ) : !result ? (
+              <div className="border border-slate-800 rounded-2xl bg-slate-900/20 overflow-hidden">
+                {/* Panel header */}
+                <div className="px-6 py-4 border-b border-slate-800/60 flex items-center gap-3">
+                  <div className="p-1.5 bg-slate-800 rounded-lg">
+                    <Receipt className="w-4 h-4 text-slate-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-200">How it works</h3>
+                    <p className="text-xs text-slate-500">Three steps to a deterministic fair split</p>
+                  </div>
+                </div>
+
+                {/* Steps */}
+                <div className="p-5 space-y-5">
+                  <div className="flex gap-4">
+                    <div className="flex-shrink-0 w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-emerald-400">
+                      1
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                        <Upload className="w-4 h-4 text-emerald-400" />
+                        Upload receipt
+                      </div>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        Photograph or screenshot of any restaurant bill. The AI reads all line items, taxes, service charges, and discounts directly from the image.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <div className="flex-shrink-0 w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-emerald-400">
+                      2
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                        <Users className="w-4 h-4 text-emerald-400" />
+                        Describe consumption
+                      </div>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        Plain English: who was there, what each person ordered, who shared what, and who paid. The AI maps this to the receipt items.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <div className="flex-shrink-0 w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-emerald-400">
+                      3
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                        <Sparkles className="w-4 h-4 text-emerald-400" />
+                        Review the split
+                      </div>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        The deterministic financial engine allocates taxes, service charges, and discounts proportionally — then produces per-person totals and settle-up instructions.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Trust statement */}
+                <div className="px-6 py-4 border-t border-slate-800/60 bg-slate-900/40">
+                  <p className="text-xs text-slate-500 leading-relaxed">
+                    <span className="text-slate-400 font-medium">AI interprets context.</span>{' '}
+                    Financial calculations remain deterministic — application code calculates all money; the AI never computes monetary values.
+                  </p>
+                </div>
+              </div>
             ) : (
-              <div className="space-y-6">
+              <div className="space-y-4">
                 {/* Header Summary Cards */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
                     <span className="text-xs text-slate-400 block font-medium">
                       Grand Total
                     </span>
@@ -402,7 +304,7 @@ export default function HomePage() {
                     </span>
                   </div>
 
-                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
                     <span className="text-xs text-slate-400 block font-medium">
                       Paid By
                     </span>
@@ -411,7 +313,7 @@ export default function HomePage() {
                     </span>
                   </div>
 
-                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
                     <span className="text-xs text-slate-400 block font-medium">
                       Sum of Person Totals
                     </span>
@@ -420,7 +322,7 @@ export default function HomePage() {
                     </span>
                   </div>
 
-                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+                  <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
                     <span className="text-xs text-slate-400 block font-medium">
                       Reconciliation
                     </span>
@@ -444,9 +346,24 @@ export default function HomePage() {
                   </div>
                 </div>
 
+                {/* Flags / Warnings — shown prominently BEFORE settle-up */}
+                {result.flags.length > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 text-xs text-amber-300 space-y-2">
+                    <div className="font-semibold flex items-center gap-1.5 text-amber-200">
+                      <AlertTriangle className="w-4 h-4" />
+                      Warnings &amp; Flags
+                    </div>
+                    <ul className="list-disc list-inside space-y-1 text-amber-200">
+                      {result.flags.map((flag, idx) => (
+                        <li key={idx}>{flag}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {/* Settle Up Cards */}
                 {result.settle_up.length > 0 && (
-                  <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-3">
+                  <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-2">
                     <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                       <ArrowRight className="w-4 h-4 text-emerald-400" />
                       Settle-Up Instructions
@@ -476,7 +393,7 @@ export default function HomePage() {
                 )}
 
                 {/* Per Person Breakdown Table */}
-                <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-3">
                   <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                     <Users className="w-4 h-4 text-emerald-400" />
                     Per-Person Breakdown
@@ -486,39 +403,39 @@ export default function HomePage() {
                     <table className="w-full text-left text-sm text-slate-300">
                       <thead className="text-xs uppercase bg-slate-950/60 text-slate-400 border-b border-slate-800">
                         <tr>
-                          <th className="py-3 px-3">Name</th>
-                          <th className="py-3 px-3">Items Consumed</th>
-                          <th className="py-3 px-3 text-right">Subtotal</th>
-                          <th className="py-3 px-3 text-right">Tax</th>
-                          <th className="py-3 px-3 text-right">Service</th>
-                          <th className="py-3 px-3 text-right">Discount</th>
-                          <th className="py-3 px-3 text-right">Total</th>
+                          <th className="py-2 px-3">Name</th>
+                          <th className="py-2 px-3">Items Consumed</th>
+                          <th className="py-2 px-3 text-right">Subtotal</th>
+                          <th className="py-2 px-3 text-right">Tax</th>
+                          <th className="py-2 px-3 text-right">Service</th>
+                          <th className="py-2 px-3 text-right">Discount</th>
+                          <th className="py-2 px-3 text-right">Total</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/60">
                         {result.per_person.map((person, idx) => (
                           <tr key={idx} className="hover:bg-slate-800/30">
-                            <td className="py-3.5 px-3 font-semibold text-white">
+                            <td className="py-2.5 px-3 font-semibold text-white">
                               {person.name}
                             </td>
-                            <td className="py-3.5 px-3 text-xs text-slate-400 max-w-xs">
+                            <td className="py-2.5 px-3 text-xs text-slate-400 max-w-xs">
                               {person.items.join(', ') || 'Default split items'}
                             </td>
-                            <td className="py-3.5 px-3 text-right">
+                            <td className="py-2.5 px-3 text-right">
                               ₹{person.subtotal}
                             </td>
-                            <td className="py-3.5 px-3 text-right">
+                            <td className="py-2.5 px-3 text-right">
                               ₹{person.tax_share}
                             </td>
-                            <td className="py-3.5 px-3 text-right">
+                            <td className="py-2.5 px-3 text-right">
                               ₹{person.service_share}
                             </td>
-                            <td className="py-3.5 px-3 text-right text-emerald-400">
+                            <td className="py-2.5 px-3 text-right text-emerald-400">
                               {person.discount_share !== 0
                                 ? `₹${person.discount_share}`
                                 : '₹0'}
                             </td>
-                            <td className="py-3.5 px-3 text-right font-bold text-white">
+                            <td className="py-2.5 px-3 text-right font-bold text-white">
                               ₹{person.total}
                             </td>
                           </tr>
@@ -533,26 +450,11 @@ export default function HomePage() {
                   <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-4 text-xs text-blue-300 space-y-2">
                     <div className="font-semibold flex items-center gap-1.5 text-blue-200">
                       <Info className="w-4 h-4" />
-                      Assumptions Made
+                      Interpretive Assumptions
                     </div>
                     <ul className="list-disc list-inside space-y-1 text-slate-300">
                       {result.assumptions.map((asm, idx) => (
                         <li key={idx}>{asm}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {/* Flags / Warnings Section */}
-                {result.flags.length > 0 && (
-                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 text-xs text-amber-300 space-y-2">
-                    <div className="font-semibold flex items-center gap-1.5 text-amber-200">
-                      <AlertTriangle className="w-4 h-4" />
-                      System Flags & Warnings
-                    </div>
-                    <ul className="list-disc list-inside space-y-1 text-amber-200">
-                      {result.flags.map((flag, idx) => (
-                        <li key={idx}>{flag}</li>
                       ))}
                     </ul>
                   </div>
