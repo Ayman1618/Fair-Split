@@ -238,7 +238,7 @@ Rules:
 3. For "item_allocations", ONLY include items that can be matched to the Receipt Items Available list above. Do NOT invent items that are not on the receipt.
 4. If the description references an item that does NOT appear in the receipt list, do NOT include it in "item_allocations". Instead, record it in "assumptions" as: "Item '[name]' mentioned in description was not found on the receipt and was excluded."
 5. If statements like "everything else common to all" or "shared among all" exist, set "default_consumers" to all participants.
-6. Record any defensible interpretations in "assumptions".
+6. Record any defensible interpretations in "assumptions". If all items mentioned in the description were matched to receipt items, record: "All items mentioned in the description were matched to items on the receipt."
 7. Output ONLY valid raw JSON. No markdown wrappers.`;
 
   const responseText = await withRetry(async () => {

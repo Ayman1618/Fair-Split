@@ -281,9 +281,9 @@ export function calculateBillSplit(
         : `-₹${Math.abs(remainderRupees)}`;
 
     assumptions.push(
-      `Rounding remainder of ${signedRemainderStr} allocated deterministically to ${[
+      `A ₹${absRemainder} rounding adjustment was allocated to ${[
         ...new Set(allocatedNames),
-      ].join(', ')} (based on highest fractional paise share) to reconcile sum of person totals with settlement target of ₹${settlementTargetRupees}.`
+      ].join(', ')} based on the highest fractional share, ensuring the person totals reconcile to ₹${settlementTargetRupees}.`
     );
   }
 

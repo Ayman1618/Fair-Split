@@ -362,7 +362,7 @@ describe('Rounding remainder allocation', () => {
     const result = calculateBillSplit(receipt, desc);
     expect(result.reconciliation.sum_of_person_totals).toBe(310);
     expect(result.reconciliation.matches_bill).toBe(true);
-    expect(result.assumptions.some((a) => a.includes('Rounding remainder'))).toBe(true);
+    expect(result.assumptions.some((a) => a.includes('rounding adjustment'))).toBe(true);
   });
 });
 
