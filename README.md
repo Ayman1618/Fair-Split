@@ -4,6 +4,8 @@
 
 ---
 
+## Deployed link
+https://fair-split-lovat.vercel.app/
 ## Architecture
 
 ```
