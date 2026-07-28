@@ -4,150 +4,126 @@ This document records three issues found during manual testing where the AI extr
 
 ---
 
-## Issue 1 — Nonexistent Item Was Treated as an Assumption Instead of a Warning
+## Issue 1 — Missing Receipt Item Was Treated as an Assumption
 
-**Observed during:** Manual testing with the R2 receipt.
+**Test:** R2 receipt
 
-![alt text](image-8.png)
+![R2 receipt used for testing](image-8.png)
 
-**Test case:**  
-The description mentioned "Chicken Tikka", but Chicken Tikka did not exist anywhere on the uploaded receipt.
+The description mentioned **"Chicken Tikka"**, but Chicken Tikka did not exist on the receipt.
 
-![alt text](image-4.png)
+![Missing item entered in the description](image-4.png)
 
-### What the AI got wrong
+### What went wrong
 
-Gemini correctly noticed that Chicken Tikka was not present on the receipt and did not add a fake item to the bill.
+Gemini correctly noticed that the item was missing and did not invent a price for it.
 
-However, it returned this information as an `assumption`. This made the problem appear in the normal Interpretive Assumptions section.
+However, it returned the problem as a normal `assumption`. That made a potentially important allocation problem look like harmless information.
 
-This is not just an assumption. If a user says they consumed an item that cannot be found on the receipt, the application should clearly warn them instead of silently continuing.
+### Fix
 
-### How it was fixed
+The prompt now tells Gemini not to allocate unmatched items.
 
-The interpretation prompt was updated to tell Gemini not to include unmatched items in `item_allocations`.
-
-The validation layer in `validator.ts` also checks the AI output. If an assumption says that an item was "not found on the receipt", it is promoted to a warning flag.
-
-As a second safety check, the validator independently verifies item allocations against the actual receipt items.
+The validation layer also checks the model's output. Missing receipt items are promoted to visible warning flags, and item allocations are independently checked against the receipt.
 
 ### Result
 
-The application no longer treats a missing receipt item as a harmless assumption. It shows a visible warning to the user while avoiding hallucinated charges.
+The application now warns the user instead of treating a missing item as a normal assumption.
 
-![alt text](image-5.png)
+![Missing item shown as a warning after the fix](image-5.png)
 
 ---
 
 ## Issue 2 — Decimal Paise Was Dropped From the Grand Total
 
-**Observed during:** Live testing with the R4 receipt.
+**Test:** R4 receipt
 
-**Test case:**  
 The receipt contained:
 
 - Subtotal: ₹1520
 - Discount: ₹228
 - Service charge: ₹76
 - GST: ₹68.40
-- Grand Total: ₹1436.40
+- Grand total: ₹1436.40
 
-![alt text](image-7.png)
+![R4 receipt showing the decimal grand total](image-7.png)
 
-### What the AI got wrong
+### What went wrong
 
-On some runs, Gemini extracted the grand total as:
+On some runs, Gemini extracted:
 
-`1436`
+`grand_total: 1436`
 
 instead of:
 
-`1436.40`
+`grand_total: 1436.40`
 
-The tax value of ₹68.40 was extracted correctly, but the `.40` was dropped from the grand total.
+It correctly read the ₹68.40 tax but dropped the `.40` from the final total.
 
-This created a mismatch between the extracted total and the receipt components.
+### Fix
 
-### How it was fixed
+The extraction prompt was updated to explicitly preserve printed decimal values.
 
-The receipt extraction prompt was updated with explicit instructions to preserve decimal and paise values exactly as printed.
-
-A deterministic post-extraction check was also added. Receipt components are converted to integer paise and checked using:
-
-`subtotal + tax + service + tip + round_off - discount`
-
-For small sub-rupee differences, such as ₹1436 being extracted instead of ₹1436.40, application code can safely correct the precision error.
-
-The calculation is done in TypeScript rather than asking Gemini to fix its own arithmetic.
+A second check was added in application code. Receipt values are converted to integer paise and compared. If the difference is only sub-rupee and the components clearly support the decimal value, the precision error can be corrected without asking the model to do arithmetic.
 
 ### Result
 
-The R4 receipt now produces the correct ₹1436.40 grand total while the final whole-rupee settlement remains deterministic and reconciled.
+The same R4 case now keeps the correct ₹1436.40 receipt total and reconciles correctly.
 
-![alt text](image-6.png)
+![R4 result after the decimal fix](image-6.png)
+
 ---
 
-## Issue 3 — Intermediate Receipt Totals Caused the Wrong Grand Total
+## Issue 3 — Complex Receipt Structure Produced the Wrong Total
 
-**Observed during:** Manual testing with a real hierarchical restaurant receipt.
+**Test:** Real restaurant receipt with several intermediate totals
 
-**Test case:**  
-The printed payable amount on the receipt was ₹2238.
+The final payable amount printed on the receipt was **₹2238**.
 
-The receipt contained several intermediate totals and charges. During extraction, some of these values were interpreted in a way that made the application's component arithmetic produce ₹2538.
+![Complex receipt showing the printed payable amount](image-1.png)
 
-![alt text](image-1.png)
+### What went wrong
 
-### What the AI got wrong
+The receipt contained intermediate totals and charges.
 
-The receipt had a more complicated structure than the simpler test receipts.
+Gemini's extracted components did not represent this structure correctly. The first version of the application's arithmetic guard trusted those components too much and replaced the printed ₹2238 total with **₹2538**.
 
-Gemini's extraction of the receipt components caused an intermediate total or charge structure to be interpreted incorrectly. The original arithmetic guard then trusted the extracted components and replaced the printed ₹2238 grand total with ₹2538.
+![Incorrect ₹2538 result before the fix](image-2.png)
 
-So even though ₹2238 was the actual payable amount printed on the receipt, the application displayed ₹2538.
+This showed another problem: even deterministic code can produce the wrong answer if it blindly trusts incorrectly extracted AI data.
 
-![alt text](image-2.png)
+### Fix
 
-### How it was fixed
+The prompt was improved to distinguish intermediate receipt totals from the final payable amount.
 
-The extraction prompt was updated to distinguish the final payable amount from intermediate values such as food totals and subtotals.
+More importantly, the arithmetic guard was made conservative:
 
-The deterministic grand-total guard was also made more conservative.
-
-If the component calculation differs from the printed grand total only by a small sub-rupee amount, the application can correct it as a likely decimal extraction issue.
-
-If the difference is ₹1 or more, the application does **not** automatically replace the printed grand total. It preserves the printed payable amount and can flag the structural mismatch instead.
-
-This prevents the application from creating a new total from potentially misread receipt components.
+- A small sub-rupee difference can be treated as a likely decimal extraction error.
+- A difference of ₹1 or more is treated as a structural mismatch.
+- For a large mismatch, the application keeps the printed grand total and flags the inconsistency instead of inventing a replacement.
 
 ### Result
 
-Using the same receipt and the same description after the fix:
+Using the same receipt and description:
 
-- Before fix: ₹2538
-- Correct printed total: ₹2238
-- After fix: ₹2238
-- Sum of person totals: ₹2238
-- Reconciliation: Reconciled
+| | Result |
+|---|---:|
+| Before fix | ₹2538 |
+| Printed payable amount | ₹2238 |
+| After fix | **₹2238** |
+| Sum of person totals | **₹2238** |
+| Reconciliation | **Reconciled** |
 
-![alt text](image-3.png)
+![Correct ₹2238 result after the fix](image-3.png)
 
 ---
 
-## What These Failures Changed
+## What I Took From These Failures
 
-These tests reinforced the main design decision of Fair Split:
+These failures shaped the main rule behind Fair Split:
 
-**AI interprets the input, but application code controls the money.**
+> **Use AI for interpretation, not as the final authority on money.**
 
-Gemini is useful for reading receipts and understanding descriptions such as who ate what. However, its output is treated as untrusted structured data.
+Gemini reads the receipt and understands the description. Its output is then checked before normal TypeScript code performs the split.
 
-The application therefore uses:
-
-- prompt constraints to improve extraction,
-- validation to catch suspicious AI output,
-- integer-paise arithmetic for monetary calculations,
-- conservative correction rules,
-- and visible warnings when the input cannot be safely reconciled.
-
-This keeps the AI useful for interpretation without relying on it for deterministic financial calculations.
+When something is clearly wrong, the application corrects only what it can safely prove. When it cannot safely decide, it flags the problem instead of guessing.

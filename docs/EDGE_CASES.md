@@ -1,32 +1,146 @@
-# Edge Cases & Mitigation Strategies
+# Edge Cases
 
-Fair Split is designed around the principle of **"detected and flagged over guessed and returned confidently"**.
+Fair Split was tested with both normal and problematic inputs. When the app cannot safely decide something, it flags the issue instead of guessing.
 
-Below are the key edge cases handled by the system:
+---
 
-## 1. Unstated or Ambiguous Payer
-- **Behavior**: `paid_by` is set to `"Unknown"`. Settle-up transfers are disabled (`settle_up: []`).
-- **Flag Added**: `"Payer not stated in description."` or `"Stated payer is not listed among participants."`
+## 1. Missing or Invalid Payer
 
-## 2. Unmapped Description Items
-- **Behavior**: Description items that fail fuzzy matching confidence threshold against receipt items are skipped from explicit item allocations.
-- **Flag Added**: `"Description item 'X' could not be matched to any receipt line item."`
+**Input:** No payer is mentioned, or the payer is not part of the group.
 
-## 3. Receipt Arithmetic Mismatches & Truncation Guards
-- **Behavior**: Extracted values are preserved as printed. Line item sums are checked against printed subtotals and grand totals.
-- **Correction**: If extracted `grand_total` disagrees with component arithmetic (`subtotal + tax + service + tip + round_off - discount`), application code deterministically corrects `grand_total` and flags the adjustment.
-- **Flag Added**: `"Sum of line items (₹X) does not match printed subtotal (₹Y)."` or `"Extracted grand total ₹X did not match component arithmetic..."`
+**Handling:** Sets the payer to `Unknown`, shows a warning, and skips settle-up instructions.
 
-## 4. Decimal & Paise-Level Grand Totals
-- **Behavior**: Preserves exact printed decimal receipt grand totals (e.g. ₹1436.40). Internal calculations use integer paise (1 rupee = 100 paise) so no floating-point precision artifacts (e.g. `0.599999999999909`) occur.
-- **Assumption Recorded**: Explains whole-rupee settlement rules when decimal paise exist on the receipt total.
+**Verified:** ✅ Automated tests
 
-## 5. Whole-Rupee Rounding Remainder
-- **Behavior**: Proportional shares are rounded to nearest whole rupees. Any remaining difference ($\pm 1$ or $\pm 2$ rupees) is allocated deterministically to participants with the highest subtotal or fractional remainder.
-- **Assumption Recorded**: `"A ₹1 rounding adjustment was allocated to [Name] based on the highest fractional share, ensuring the person totals reconcile to ₹[Total]."`
+---
 
-## 6. Discounts & Service Charges
-- **Behavior**: Discounts are represented as non-positive numbers in `discount_share` (e.g. `-20`) and allocated proportionally to pre-tax food subtotals. Bills with zero tax or service charge evaluate cleanly without division-by-zero errors.
+## 2. Item Not Found on the Receipt
 
-## 7. Blank / Invalid Inputs
-- **Behavior**: Empty images or missing descriptions trigger standard 400 Bad Request responses with explanatory JSON error payloads.
+**Input:** The description mentions an item, such as "Chicken Tikka", that is not on the receipt.
+
+**Handling:** Does not invent a price or allocation. The missing item is flagged.
+
+**Verified:** ✅ Automated + manual testing
+
+---
+
+## 3. Complex Receipt With Intermediate Totals
+
+**Input:** A receipt contains several stages such as subtotal → service charge → food total → GST → discount → final payable amount.
+
+In one test, the printed total was **₹2238**, but the extracted components initially caused the app to calculate **₹2538**.
+
+**Handling:** Large differences are no longer automatically "corrected". The printed payable amount is kept and the mismatch is flagged instead.
+
+**Verified:** ✅ Automated regression test + manual before/after test
+
+---
+
+## 4. Different Sharing Rules
+
+**Input:** Some items are shared by everyone while others belong to specific people.
+
+**Handling:** Specific allocations are applied first; remaining items follow the general sharing rule.
+
+**Verified:** ✅ Automated + manual testing
+
+---
+
+## 5. Decimal / Paise Values
+
+**Input:** Values such as ₹68.40 or a grand total of ₹1436.40.
+
+**Handling:** Money is checked using integer paise. Clear sub-rupee extraction errors can be safely corrected.
+
+**Verified:** ✅ Automated + manual R4 testing
+
+---
+
+## 6. Receipt Arithmetic Does Not Add Up
+
+**Input:** Item prices do not match the subtotal, or extracted charges do not match the printed total.
+
+**Handling:** Shows a warning instead of changing values just to make the bill reconcile.
+
+**Verified:** ✅ Automated tests
+
+---
+
+## 7. Rounding After Splitting
+
+**Input:** Fractional shares leave the rounded person totals ₹1–₹2 away from the settlement total.
+
+**Handling:** The difference is distributed using a fixed rounding rule and recorded as an assumption.
+
+**Verified:** ✅ Automated test
+
+---
+
+## 8. No Discount or Service Charge
+
+**Input:** The receipt has no discount, no service charge, or both are zero.
+
+**Handling:** Their shares remain ₹0 and the rest of the split works normally.
+
+**Verified:** ✅ Automated tests
+
+---
+
+## 9. Payer Also Ate
+
+**Input:** The person who paid also has their own share of the bill.
+
+**Handling:** Their share is calculated normally, but no payment from the payer to themselves is created.
+
+**Verified:** ✅ Automated test
+
+---
+
+## 10. No Participants Identified
+
+**Input:** The description does not provide a usable group of people.
+
+**Handling:** Returns a warning instead of inventing participants or attempting an invalid split.
+
+**Verified:** ✅ Automated test
+
+---
+
+## 11. Poor or Unclear Receipt Image
+
+**Input:** The receipt is blurry, cropped, badly lit, or difficult to read.
+
+**Handling:** Validation may catch inconsistent values, but correct OCR cannot be guaranteed. Detected problems are flagged rather than forced to match.
+
+**Verified:** ⚠️ Manually explored, not exhaustively tested
+
+---
+
+## 12. Missing API Input
+
+**Input:** The receipt image or description is missing from the request.
+
+**Handling:** The API rejects the request instead of attempting an incomplete split.
+
+**Verified:** ✅ API validation implemented
+
+---
+
+## 13. Multiple Payers
+
+**Input:** Two or more people paid different parts of the bill.
+
+**Handling:** Not supported in this version. Fair Split currently uses a single-payer settlement model.
+
+**Verified:** ⚠️ Known limitation; intentionally not implemented
+
+---
+
+## Overall Approach
+
+Fair Split does not assume that every receipt can be understood perfectly.
+
+- Safe cases are calculated in code.
+- AI output is corrected only when there is clear evidence.
+- Uncertain cases are flagged instead of guessed.
+- Unsupported cases are stated openly.

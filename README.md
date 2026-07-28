@@ -1,122 +1,87 @@
 # Fair Split
 
-**Fair Split** is an auditable, deterministic bill-splitting application that processes restaurant receipt images alongside natural-language descriptions of who ate what and who paid.
+Fair Split takes a restaurant receipt and a short description of who ate what and who paid. Gemini reads and interprets the inputs, while the actual money calculations are done in TypeScript.
+
+**Live App:** https://fair-split-lovat.vercel.app/
+
+## Submission Deliverables
+
+| Deliverable | Where to Find It |
+|---|---|
+| Deployed API + Frontend | [Live App](https://fair-split-lovat.vercel.app/) and `POST /api/split` |
+| Prompt Log | [docs/PROMPT_LOG.md](docs/PROMPT_LOG.md) |
+| Edge Cases | [docs/EDGE_CASES.md](docs/EDGE_CASES.md) |
+| Where the AI Was Wrong | [docs/AI_FAILURES.md](docs/AI_FAILURES.md) |
+
+**Verification:** 25 / 25 automated tests passing, with successful typecheck and production build.
 
 ---
 
-## Deployed link
-https://fair-split-lovat.vercel.app/
-## Architecture
+## How It Works
 
+```text
+Receipt Image + Description
+        ↓
+Gemini
+  • Reads receipt data
+  • Understands who ate what
+  • Identifies who paid
+        ↓
+Validation
+  • Checks extracted receipt values
+  • Matches described items to receipt items
+  • Flags suspicious or missing information
+        ↓
+TypeScript Calculation Engine
+  • Splits item costs
+  • Allocates tax, service charge and discounts
+  • Handles rounding
+  • Calculates settle-up amounts
+        ↓
+Final Split + Warnings + Assumptions
 ```
-Receipt Image Base64 + Consumption Description
-       ↓
-Gemini Interpretation (gemini-3.5-flash-lite)
-  ├─ Step 1: Multimodal Receipt Data Extraction
-  └─ Step 2: Natural Language Consumption & Payer Mapping
-       ↓
-Validation & Extraction Guard Layer
-  ├─ Deterministic Component Arithmetic Correction (subtotal + tax + service + tip + round_off - discount = grand_total)
-  └─ Semantic Cross-Reference & Fuzzy Matching
-       ↓
-Deterministic TypeScript Calculation Engine
-  ├─ Internal Integer Paise Arithmetic (eliminates IEEE-754 floating-point drift)
-  ├─ Proportional Charge & Discount Allocation
-  └─ Whole-Rupee Settlement Rounding & Remainder Allocation
-       ↓
-Reconciliation & Settle-Up Instructions
-       ↓
-API Response / Interactive Web Dashboard
-```
+
+The main rule is simple:
+
+> **AI interprets the input. Application code calculates the money.**
+
+Gemini does not calculate the final bill split. This keeps the financial calculations deterministic and testable.
 
 ---
 
-## Core Principle: AI Interprets Context; Application Code Calculates Money
+## What Fair Split Handles
 
-- **Financial Determinism**: LLMs extract line items and interpret consumption rules. All monetary arithmetic (subtotals, proportional tax/service/discount shares, integer paise calculations, rounding remainder distribution, and settle-up balances) is executed purely in TypeScript.
-- **Auditable & Predictable**: The engine never relies on LLM arithmetic, preventing floating-point drift, hallucinations, or silent calculation errors.
-- **Explicit Flags**: Ambiguities (such as unstated payers or unmatched items) trigger transparent warnings rather than guessed monetary facts.
+- Receipt images with line items, tax, service charge, discounts and round-off
+- Natural-language descriptions of who consumed each item
+- Items shared by everyone or only some people
+- A single person paying for the bill
+- Proportional tax, service charge and discount allocation
+- Decimal receipt totals such as ₹1436.40
+- Whole-rupee per-person settlement
+- Missing payers, unmatched items and suspicious receipt arithmetic through visible warnings
 
----
+When the application cannot safely infer something, it prefers to **flag the problem rather than guess**.
 
-## Main Capabilities
-
-- **Multimodal Receipt Processing**: Reads line items, subtotal, tax, service charges, discounts, tip, round-off, and grand total directly from images.
-- **Natural Language Parsing**: Maps complex consumption rules (subset item sharing, default item sharing, and designated payers).
-- **Proportional Charges**: Distributes taxes, service fees, and discounts proportionally based on pre-tax food subtotals.
-- **Whole-Rupee Settlement**: Computes per-person payable amounts as whole rupees while preserving exact printed decimal receipt totals (e.g., ₹1436.40).
-- **Deterministic Settle-Up**: Generates net peer-to-peer transfers to the designated payer.
-
----
-
-## Important Edge-Case Handling
-
-- **Decimal & Paise Receipt Totals**: Preserves printed decimal grand totals (e.g. ₹1436.40). Internal arithmetic uses integer paise (1 rupee = 100 paise) so no floating-point artifacts (e.g. `0.599999999999909`) ever appear.
-- **LLM Truncation Guard**: Automatically corrects extracted grand totals using deterministic component arithmetic if the LLM drops decimal paise.
-- **Unstated / Invalid Payer**: Sets `paid_by` to `"Unknown"`, disables `settle_up`, and adds an explicit warning flag.
-- **Unmatched Description Items**: Flags items mentioned in the description that do not exist on the receipt, excluding them from calculations.
+See [Edge Cases](docs/EDGE_CASES.md) for the full list.
 
 ---
 
 ## Tech Stack
 
-- **Framework**: Next.js 14 (App Router, TypeScript)
-- **Styling**: Tailwind CSS
-- **AI Integration**: Google Generative AI SDK (`gemini-3.5-flash-lite`)
-- **Testing**: Vitest
+- Next.js 14 + TypeScript
+- Tailwind CSS
+- Google Gemini (`gemini-3.5-flash-lite`)
+- Vitest
+- Vercel
 
 ---
 
-## Local Setup & Configuration
+## API
 
-### 1. Clone & Install Dependencies
-```bash
-npm install
-```
+### `POST /api/split`
 
-### 2. Configure Environment Variables
-Copy `.env.example` to `.env.local`:
-```bash
-cp .env.example .env.local
-```
+Example request:
 
-Set your Gemini API key in `.env.local`:
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-```
-
-### 3. Run Development Server
-```bash
-npm run dev
-```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
-
----
-
-## Testing & Verification
-
-Run the automated test suite (no API key required):
-
-```bash
-npm test
-```
-
-- **Current Status**: **25 / 25 tests passing** (20 engine/validator tests + 5 extraction correction tests).
-
-To run type checking and production build verification:
-```bash
-npx tsc --noEmit
-npm run build
-```
-
----
-
-## Mandatory API Contract
-
-### Endpoint
-`POST /api/split`
-
-**Request Body**:
 ```json
 {
   "receipt_base64": "<base64-encoded image>",
@@ -124,13 +89,24 @@ npm run build
 }
 ```
 
-**Response Body**:
+The response contains:
+
+- each person's items and total
+- receipt grand total
+- reconciliation result
+- payer
+- settle-up instructions
+- assumptions
+- warning flags
+
+Example:
+
 ```json
 {
   "per_person": [
     {
       "name": "Aman",
-      "items": ["Paneer Butter Masala (¼)", "Dal Makhani (¼)", "Butter Naan (¼)", "Jeera Rice (¼)", "Masala Papad (¼)"],
+      "items": ["Paneer Butter Masala (¼)", "Dal Makhani (¼)"],
       "subtotal": 275,
       "tax_share": 14,
       "service_share": 14,
@@ -145,27 +121,79 @@ npm run build
   },
   "paid_by": "Priya",
   "settle_up": [
-    { "from": "Aman", "to": "Priya", "amount": 303 }
+    {
+      "from": "Aman",
+      "to": "Priya",
+      "amount": 303
+    }
   ],
-  "assumptions": [
-    "A ₹1 rounding adjustment was allocated to Priya based on the highest fractional share, ensuring the person totals reconcile to ₹1345."
-  ],
+  "assumptions": [],
   "flags": []
 }
 ```
 
 ---
 
-## Limitations & Assumptions
+## Local Setup
 
-- **Receipt Clarity**: Image quality must be sufficient for OCR line item and charge extraction.
-- **Currency**: Formatted for Indian Rupees (₹) and whole-rupee participant settlement rules.
-- **Single Payer**: Supports single-payer settlement per receipt submission.
+Install dependencies:
+
+```bash
+npm install
+```
+
+Create your local environment file:
+
+```bash
+cp .env.example .env.local
+```
+
+Add your Gemini API key:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+Run the app:
+
+```bash
+npm run dev
+```
+
+Open `http://localhost:3000`.
 
 ---
 
-## Documentation Links
+## Testing
 
-- [Edge Cases Documentation](docs/EDGE_CASES.md)
-- [Prompt Log & Architecture](docs/PROMPT_LOG.md)
-- [AI Failures & Fixes](docs/AI_FAILURES.md)
+Run the tests:
+
+```bash
+npx vitest run
+```
+
+Current result:
+
+```text
+Test Files  2 passed (2)
+Tests       25 passed (25)
+```
+
+Typecheck and production build:
+
+```bash
+npx tsc --noEmit
+npm run build
+```
+
+Both pass successfully.
+
+---
+
+## Current Limitations
+
+- Receipt text must be clear enough for the model to read.
+- The current version supports one payer per bill.
+- Participant settlement is in whole rupees.
+- Very unusual receipt layouts may produce conflicting extracted values. In those cases, Fair Split preserves the printed total and flags the mismatch instead of inventing a replacement.
+- There is no authentication, history or persistence. One bill goes in and one split comes out.
