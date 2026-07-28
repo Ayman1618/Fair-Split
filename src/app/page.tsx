@@ -300,7 +300,7 @@ export default function HomePage() {
                       Grand Total
                     </span>
                     <span className="text-xl font-bold text-white mt-1 block">
-                      ₹{result.grand_total}
+                      ₹{result.grand_total % 1 !== 0 ? result.grand_total.toFixed(2) : result.grand_total}
                     </span>
                   </div>
 

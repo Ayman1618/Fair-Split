@@ -1,16 +1,16 @@
 import { describe, it, expect } from 'vitest';
 
 // ---------------------------------------------------------------------------
-// Unit tests for the post-extraction grand-total correction logic in
+// Unit tests for the post-extraction grand-total guard logic in
 // llmService.ts (extractReceiptData).
 //
-// The correction is deterministic application-layer arithmetic: it never
-// involves the LLM. We test it here by replicating the paise formula and
-// verifying the expected correction behaviour without making any API calls.
+// The guard is deterministic application-layer logic: it never involves the LLM.
+// We test it here by replicating the paise guard formula and verifying the
+// expected behaviour without making any API calls.
 // ---------------------------------------------------------------------------
 
 /**
- * Replicates the correction logic from extractReceiptData exactly.
+ * Replicates the guard logic from extractReceiptData exactly.
  * Returns { finalGrandTotal, corrected: boolean, flagText: string | null }.
  */
 function simulateExtractionCorrection(parsed: {
@@ -35,17 +35,20 @@ function simulateExtractionCorrection(parsed: {
     subtotalPaise + taxPaise + serviceChargePaise + tipPaise + roundOffPaise - discountPaise;
 
   const extractedGrandTotalPaise = toPaise(parsed.grand_total || 0);
+  const diffPaise = Math.abs(recomputedPaise - extractedGrandTotalPaise);
 
   let finalGrandTotal = parsed.grand_total || 0;
   let corrected = false;
   let flagText: string | null = null;
 
-  if (Math.abs(recomputedPaise - extractedGrandTotalPaise) > 1) {
+  const fmt = (n: number) => {
+    const s = n.toFixed(2);
+    return s.endsWith('.00') ? s.slice(0, -3) : s;
+  };
+
+  if (diffPaise > 1 && diffPaise < 100) {
+    // Sub-rupee decimal truncation — safe to auto-correct
     const recomputedRupees = recomputedPaise / 100;
-    const fmt = (n: number) => {
-      const s = n.toFixed(2);
-      return s.endsWith('.00') ? s.slice(0, -3) : s;
-    };
     flagText =
       `Extracted grand total ₹${fmt(parsed.grand_total || 0)} did not match component arithmetic ` +
       `(subtotal ₹${fmt(parsed.subtotal || 0)} + tax ₹${fmt(parsed.tax || 0)} ` +
@@ -54,43 +57,82 @@ function simulateExtractionCorrection(parsed: {
       `Grand total corrected to ₹${fmt(recomputedRupees)} by deterministic component arithmetic.`;
     finalGrandTotal = recomputedRupees;
     corrected = true;
+  } else if (diffPaise >= 100) {
+    // Large structural mismatch — preserve printed grand total, do NOT fabricate replacement
+    const recomputedRupees = recomputedPaise / 100;
+    flagText =
+      `Sum of extracted receipt components (₹${fmt(recomputedRupees)}) differs from printed grand total ` +
+      `(₹${fmt(parsed.grand_total || 0)}). Preserving printed grand total.`;
+    // finalGrandTotal remains parsed.grand_total
+    corrected = false;
   }
 
   return { finalGrandTotal, corrected, flagText };
 }
 
 // ---------------------------------------------------------------------------
-// R4 live failure regression
+// Regression Test Suites (R4 Decimal Truncation & Hierarchical Receipts)
 // ---------------------------------------------------------------------------
-describe('Extraction-layer grand-total correction (R4 regression)', () => {
-  it('R4: LLM extracts grand_total 1436 but components sum to 1436.40 — corrects to 1436.40', () => {
-    // This is the exact live failure scenario: the LLM dropped the .40 paise
-    // component from the printed grand total of ₹1436.40.
+describe('Extraction-layer grand-total guard logic', () => {
+
+  // -------------------------------------------------------------------------
+  // Test A: R4 decimal truncation
+  // -------------------------------------------------------------------------
+  it('A. R4 decimal truncation: 1436 extracted instead of 1436.40 -> safe auto-correction works', () => {
+    // Exact R4 failure scenario: printed grand total was 1436.40, LLM extracted 1436.
+    // Discrepancy is 40 paise (< 100 paise). Guard must auto-correct to 1436.40.
     const result = simulateExtractionCorrection({
       subtotal: 1520,
       discount: 228,
       service_charge: 76,
       tax: 68.4,
       round_off: 0,
-      grand_total: 1436, // LLM-extracted truncated value
+      grand_total: 1436, // truncated extracted value
     });
 
     expect(result.corrected).toBe(true);
-    // Corrected to the component-arithmetic total
     expect(result.finalGrandTotal).toBeCloseTo(1436.40, 5);
-    // toPaise(1436.40) = 143640 → finalGrandTotal = 143640/100 = 1436.40
-    expect(Math.round(result.finalGrandTotal * 100)).toBe(143640);
-    // Flag must be present
     expect(result.flagText).not.toBeNull();
-    expect(result.flagText).toContain('₹1436.40');
-    expect(result.flagText).toContain('₹1436');
-    expect(result.flagText).toContain('corrected');
-    // No floating-point artifacts in the flag text
-    expect(result.flagText).not.toMatch(/\d\.\d{6,}/);
+    expect(result.flagText).toContain('corrected to ₹1436.40');
   });
 
-  it('Correct grand_total provided — no correction applied', () => {
-    // LLM correctly extracts grand_total 1436.40
+  // -------------------------------------------------------------------------
+  // Test B: Hierarchical receipt
+  // -------------------------------------------------------------------------
+  it('B. Hierarchical receipt: large component mismatch does NOT overwrite printed payable amount (remains 2238, not 2538)', () => {
+    // Hierarchical receipt scenario:
+    // Sub Total: 2067.00
+    // Service Charge (10%): 206.70
+    // Food Total (intermediate): 2273.70
+    // CGST+SGST: 113.68
+    // Round Off: 0.62
+    // Discount: 150.00
+    // Printed Payable Amount (Grand Total): 2238.00
+    //
+    // If extraction produces a component sum of 2444.70 or 2538.00 (diff >= ₹1.00),
+    // guard MUST NOT overwrite grand_total with 2538. Printed total (2238) must be preserved.
+    const result = simulateExtractionCorrection({
+      subtotal: 2273.70, // intermediate "Food Total" extracted as subtotal
+      service_charge: 206.70,
+      tax: 113.68,
+      discount: 150,
+      round_off: 0.62,
+      grand_total: 2238, // printed payable amount
+    });
+
+    // Must NOT auto-correct to 2444.70 or 2538
+    expect(result.corrected).toBe(false);
+    expect(result.finalGrandTotal).toBe(2238);
+    // Warning flag emitted explaining component difference
+    expect(result.flagText).not.toBeNull();
+    expect(result.flagText).toContain('Preserving printed grand total');
+    expect(result.flagText).toContain('2238');
+  });
+
+  // -------------------------------------------------------------------------
+  // Additional safety test cases
+  // -------------------------------------------------------------------------
+  it('Correct grand_total provided — no correction, no flag', () => {
     const result = simulateExtractionCorrection({
       subtotal: 1520,
       discount: 228,
@@ -102,11 +144,10 @@ describe('Extraction-layer grand-total correction (R4 regression)', () => {
 
     expect(result.corrected).toBe(false);
     expect(result.flagText).toBeNull();
-    expect(Math.round(result.finalGrandTotal * 100)).toBe(143640);
+    expect(result.finalGrandTotal).toBe(1436.4);
   });
 
-  it('Trivial float drift (≤1 paise) — treated as same, no correction', () => {
-    // 1000 + 100 - 50 = 1050 exactly. Tiny IEEE-754 drift must not trigger correction.
+  it('Trivial float drift (≤1 paise) — treated as exact match, no correction', () => {
     const result = simulateExtractionCorrection({
       subtotal: 1000,
       tax: 100,
@@ -116,37 +157,20 @@ describe('Extraction-layer grand-total correction (R4 regression)', () => {
     });
 
     expect(result.corrected).toBe(false);
+    expect(result.flagText).toBeNull();
   });
 
-  it('Whole-rupee components, whole-rupee grand_total — no correction', () => {
-    // R1-style receipt: all whole rupees, grand_total matches exactly
+  it('Whole-rupee components and matching grand_total — no correction', () => {
     const result = simulateExtractionCorrection({
       subtotal: 1040,
       service_charge: 52,
-      tax: 55,      // rounded for simplicity
+      tax: 55,
       discount: 0,
       round_off: 0,
       grand_total: 1147,
     });
 
-    // 1040 + 52 + 55 = 1147 exactly
     expect(result.corrected).toBe(false);
     expect(result.finalGrandTotal).toBe(1147);
-  });
-
-  it('LLM drops decimal on tax field — corrects grand_total from component sum', () => {
-    // Hypothetical: tax 68.40 extracted as 68, causing grand_total to also be wrong
-    // Component sum: 1520 - 228 + 76 + 68 = 1436. Extracted grand_total: 1436.
-    // No correction needed here because components and grand_total agree.
-    const result = simulateExtractionCorrection({
-      subtotal: 1520,
-      discount: 228,
-      service_charge: 76,
-      tax: 68, // truncated tax
-      round_off: 0,
-      grand_total: 1436, // agrees with truncated component sum
-    });
-    // Components sum: 1520 + 68 + 76 - 228 = 1436 exactly → no mismatch
-    expect(result.corrected).toBe(false);
   });
 });

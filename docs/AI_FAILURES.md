@@ -1,49 +1,153 @@
 # Where the AI Was Wrong
 
-This document records real-world empirical failures observed during AI extraction and interpretation, and how application-layer deterministic code was added to handle them.
+This document records three issues found during manual testing where the AI extraction or interpretation was incorrect or incomplete. It also explains how each issue was caught and fixed using prompt improvements, validation, and deterministic application code.
 
 ---
 
-## Confirmed Issue 1 — Nonexistent Description Item Surfaced as Assumption Instead of Warning
+## Issue 1 — Nonexistent Item Was Treated as an Assumption Instead of a Warning
 
-**Observed during:** Manual live testing with R2 receipt (Aman, Priya, Karan, Sara)
+**Observed during:** Manual testing with the R2 receipt.
 
-**Trigger:**  
-Description mentioned "Chicken Tikka" — an item not present on the R2 receipt.
+![alt text](image-8.png)
 
-**Incorrect AI behaviour:**  
-The LLM correctly recognised that Chicken Tikka was absent and did not hallucinate it onto the bill. However, it surfaced the finding only inside the `assumptions` array (blue info section in UI), which was semantically incorrect. A financial allocation failure is not a benign interpretive assumption — it is a warning.
+**Test case:**  
+The description mentioned "Chicken Tikka", but Chicken Tikka did not exist anywhere on the uploaded receipt.
 
-**Fix applied:**  
-1. The description interpretation prompt now explicitly instructs the LLM to exclude unmatched items from `item_allocations` and record them in `assumptions` with a specific phrase pattern.  
-2. The validation layer (`validator.ts`) scans all LLM-supplied assumptions for the "not found on the receipt" pattern and promotes matching entries to `flags` (amber warning section).  
-3. The validator also continues to independently flag any `item_allocation` entry that fails fuzzy matching, as a fallback if the LLM disobeys the prompt instruction.  
-4. Flags section is now shown above settle-up in the UI so warnings are the first thing users see.
+![alt text](image-4.png)
+
+### What the AI got wrong
+
+Gemini correctly noticed that Chicken Tikka was not present on the receipt and did not add a fake item to the bill.
+
+However, it returned this information as an `assumption`. This made the problem appear in the normal Interpretive Assumptions section.
+
+This is not just an assumption. If a user says they consumed an item that cannot be found on the receipt, the application should clearly warn them instead of silently continuing.
+
+### How it was fixed
+
+The interpretation prompt was updated to tell Gemini not to include unmatched items in `item_allocations`.
+
+The validation layer in `validator.ts` also checks the AI output. If an assumption says that an item was "not found on the receipt", it is promoted to a warning flag.
+
+As a second safety check, the validator independently verifies item allocations against the actual receipt items.
+
+### Result
+
+The application no longer treats a missing receipt item as a harmless assumption. It shows a visible warning to the user while avoiding hallucinated charges.
+
+![alt text](image-5.png)
 
 ---
 
-## Confirmed Issue 2 — Provider 503 Left Stale Previous Result Visible
+## Issue 2 — Decimal Paise Was Dropped From the Grand Total
 
-**Observed during:** Manual live testing when Gemini returned 503 Service Unavailable.
+**Observed during:** Live testing with the R4 receipt.
 
-**Incorrect UI behaviour:**  
-The frontend displayed the error message in red, but the **previous successful result** for a different receipt remained visible below it. A user could mistake the stale split for the current failed request's output.
+**Test case:**  
+The receipt contained:
 
-**Fix applied:**  
-`setResult(null)` is called at the very beginning of `handleSubmit`, before any async work. This ensures the results panel clears immediately on every new submission attempt, whether it succeeds or fails. A dedicated loading state panel is shown while the request is in-flight.
+- Subtotal: ₹1520
+- Discount: ₹228
+- Service charge: ₹76
+- GST: ₹68.40
+- Grand Total: ₹1436.40
+
+![alt text](image-7.png)
+
+### What the AI got wrong
+
+On some runs, Gemini extracted the grand total as:
+
+`1436`
+
+instead of:
+
+`1436.40`
+
+The tax value of ₹68.40 was extracted correctly, but the `.40` was dropped from the grand total.
+
+This created a mismatch between the extracted total and the receipt components.
+
+### How it was fixed
+
+The receipt extraction prompt was updated with explicit instructions to preserve decimal and paise values exactly as printed.
+
+A deterministic post-extraction check was also added. Receipt components are converted to integer paise and checked using:
+
+`subtotal + tax + service + tip + round_off - discount`
+
+For small sub-rupee differences, such as ₹1436 being extracted instead of ₹1436.40, application code can safely correct the precision error.
+
+The calculation is done in TypeScript rather than asking Gemini to fix its own arithmetic.
+
+### Result
+
+The R4 receipt now produces the correct ₹1436.40 grand total while the final whole-rupee settlement remains deterministic and reconciled.
+
+![alt text](image-6.png)
+---
+
+## Issue 3 — Intermediate Receipt Totals Caused the Wrong Grand Total
+
+**Observed during:** Manual testing with a real hierarchical restaurant receipt.
+
+**Test case:**  
+The printed payable amount on the receipt was ₹2238.
+
+The receipt contained several intermediate totals and charges. During extraction, some of these values were interpreted in a way that made the application's component arithmetic produce ₹2538.
+
+![alt text](image-1.png)
+
+### What the AI got wrong
+
+The receipt had a more complicated structure than the simpler test receipts.
+
+Gemini's extraction of the receipt components caused an intermediate total or charge structure to be interpreted incorrectly. The original arithmetic guard then trusted the extracted components and replaced the printed ₹2238 grand total with ₹2538.
+
+So even though ₹2238 was the actual payable amount printed on the receipt, the application displayed ₹2538.
+
+![alt text](image-2.png)
+
+### How it was fixed
+
+The extraction prompt was updated to distinguish the final payable amount from intermediate values such as food totals and subtotals.
+
+The deterministic grand-total guard was also made more conservative.
+
+If the component calculation differs from the printed grand total only by a small sub-rupee amount, the application can correct it as a likely decimal extraction issue.
+
+If the difference is ₹1 or more, the application does **not** automatically replace the printed grand total. It preserves the printed payable amount and can flag the structural mismatch instead.
+
+This prevents the application from creating a new total from potentially misread receipt components.
+
+### Result
+
+Using the same receipt and the same description after the fix:
+
+- Before fix: ₹2538
+- Correct printed total: ₹2238
+- After fix: ₹2238
+- Sum of person totals: ₹2238
+- Reconciliation: Reconciled
+
+![alt text](image-3.png)
 
 ---
 
-## Confirmed Issue 3 — LLM Truncated Printed Decimal Paise from Grand Total
+## What These Failures Changed
 
-**Observed during:** Live testing with R4 receipt (Dev, Nikhil, Anjali, Farah).
+These tests reinforced the main design decision of Fair Split:
 
-**Trigger:**  
-The printed receipt had: Subtotal ₹1520, Discount -₹228, Service ₹76, Tax ₹68.40 → Exact grand total ₹1436.40.
+**AI interprets the input, but application code controls the money.**
 
-**Incorrect AI behaviour:**  
-On some runs, the LLM extracted `grand_total: 1436` (dropping `.40`), while correctly extracting `tax: 68.40`. This inconsistency caused a reconciliation mismatch between component arithmetic and the reported grand total.
+Gemini is useful for reading receipts and understanding descriptions such as who ate what. However, its output is treated as untrusted structured data.
 
-**Fix applied:**  
-1. Added explicit prompt rules instructing the OCR parser to preserve paise/decimals exactly as printed (e.g., `68.40` and `1436.40`).
-2. Added post-extraction deterministic guard rail in `llmService.ts`: Recomputes expected grand total in integer paise (`subtotal + tax + service + tip + round_off - discount`). If extracted `grand_total` differs by >1 paise, application code automatically corrects `grand_total` to the recomputed value and adds an explanatory flag. No LLM arithmetic is involved in this correction.
+The application therefore uses:
+
+- prompt constraints to improve extraction,
+- validation to catch suspicious AI output,
+- integer-paise arithmetic for monetary calculations,
+- conservative correction rules,
+- and visible warnings when the input cannot be safely reconciled.
+
+This keeps the AI useful for interpretation without relying on it for deterministic financial calculations.

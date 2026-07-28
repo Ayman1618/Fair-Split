@@ -16,7 +16,7 @@ Gemini Interpretation (gemini-3.5-flash-lite)
   └─ Step 2: Natural Language Consumption & Payer Mapping
        ↓
 Validation & Extraction Guard Layer
-  ├─ Deterministic Component Arithmetic Correction (subtotal + tax + service - discount = grand_total)
+  ├─ Deterministic Component Arithmetic Correction (subtotal + tax + service + tip + round_off - discount = grand_total)
   └─ Semantic Cross-Reference & Fuzzy Matching
        ↓
 Deterministic TypeScript Calculation Engine
@@ -148,7 +148,7 @@ npm run build
     { "from": "Aman", "to": "Priya", "amount": 303 }
   ],
   "assumptions": [
-    "Rounding remainder of ₹+1 allocated deterministically to Priya..."
+    "A ₹1 rounding adjustment was allocated to Priya based on the highest fractional share, ensuring the person totals reconcile to ₹1345."
   ],
   "flags": []
 }

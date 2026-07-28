@@ -13,6 +13,9 @@
 # Production
 /build
 
+# Build Artifacts
+*.tsbuildinfo
+
 # Misc
 .DS_Store
 *.pem

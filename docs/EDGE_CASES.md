@@ -23,7 +23,7 @@ Below are the key edge cases handled by the system:
 
 ## 5. Whole-Rupee Rounding Remainder
 - **Behavior**: Proportional shares are rounded to nearest whole rupees. Any remaining difference ($\pm 1$ or $\pm 2$ rupees) is allocated deterministically to participants with the highest subtotal or fractional remainder.
-- **Assumption Recorded**: `"Rounding remainder of ₹+1 allocated deterministically to [Name]..."`
+- **Assumption Recorded**: `"A ₹1 rounding adjustment was allocated to [Name] based on the highest fractional share, ensuring the person totals reconcile to ₹[Total]."`
 
 ## 6. Discounts & Service Charges
 - **Behavior**: Discounts are represented as non-positive numbers in `discount_share` (e.g. `-20`) and allocated proportionally to pre-tax food subtotals. Bills with zero tax or service charge evaluate cleanly without division-by-zero errors.

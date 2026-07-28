@@ -93,11 +93,13 @@ Return a JSON object conforming EXACTLY to this schema:
 Rules:
 - Extract all line items with exact display names, quantities, and line totals.
 - Extract subtotal, service charge, tax (GST/VAT), discount, tip, round-off, and grand total if present.
+- subtotal: Use the pre-tax, pre-service-charge food/item subtotal ONLY. Do NOT extract intermediate totals (such as "Food Total", "Subtotal Incl Tax", or "Grand Total Before Discount") as the subtotal.
+- grand_total: The final printed payable amount / total amount due is the authoritative grand_total. Do not use intermediate totals (like "Total Before Discount" or "Food Total").
 - Default missing numeric fields to 0.
 - Do NOT perform arithmetic corrections on extracted numbers; output exact printed values.
 - CRITICAL — Decimal precision: NEVER round or truncate monetary values. Preserve every decimal digit exactly as printed on the receipt. A printed value of 68.40 MUST be output as 68.40 (not 68 or 68.4 rounded further). A printed grand total of 1436.40 MUST be output as 1436.40 (not 1436).
 - CRITICAL — Paise values: Indian receipts frequently contain paise (sub-rupee amounts). If a field reads "68.40" or "1436.40", the decimal portion is paise and must be preserved numerically as-is.
-- CRITICAL — grand_total: Copy the printed grand total exactly. Do not re-derive or recalculate it.
+- CRITICAL — grand_total: Copy the final printed payable/total amount due exactly. Do not re-derive or recalculate it.
 - Output ONLY valid raw JSON. No explanations, no markdown wrapping.`;
 
   const imagePart = {
@@ -118,52 +120,59 @@ Rules:
     const parsed = JSON.parse(cleaned) as ReceiptData;
 
     // ---------------------------------------------------------------------------
-    // Post-extraction deterministic grand-total correction.
+    // Post-extraction deterministic grand-total guard.
     //
-    // The LLM occasionally drops the decimal component of a printed grand total
-    // (e.g. extracting 1436 instead of 1436.40). To guard against this, we
-    // deterministically recompute the expected total from the component fields
-    // using integer paise arithmetic (same strategy as calcEngine.ts) and
-    // correct grand_total if the extracted value differs by more than ₹0.01.
+    // 1. Sub-rupee decimal truncation (< 100 paise discrepancy):
+    //    If the LLM drops decimal paise (e.g. extracting 1436 instead of 1436.40),
+    //    the discrepancy is small (< ₹1.00). In this unambiguous precision case,
+    //    grand_total is auto-corrected to the component recomputed value.
     //
-    // This correction is NEVER performed by the LLM — it is application-layer
-    // arithmetic on already-extracted integer/decimal fields.
+    // 2. Large structural mismatch (≥ 100 paise discrepancy):
+    //    If intermediate subtotals or hierarchical charges cause a large difference
+    //    (≥ ₹1.00), application code MUST NOT fabricate a replacement total.
+    //    The extracted/printed grand total is preserved and a warning flag is emitted.
     // ---------------------------------------------------------------------------
     const toPaise = (rupees: number): number => Math.round(rupees * 100);
 
-    const subtotalPaise    = toPaise(parsed.subtotal        || 0);
-    const taxPaise         = toPaise(parsed.tax             || 0);
-    const serviceChargePaise = toPaise(parsed.service_charge || 0);
-    const discountPaise    = toPaise(parsed.discount        || 0);
-    const tipPaise         = toPaise(parsed.tip             || 0);
-    const roundOffPaise    = toPaise(parsed.round_off       || 0);
+    const subtotalPaise      = toPaise(parsed.subtotal        || 0);
+    const taxPaise           = toPaise(parsed.tax             || 0);
+    const serviceChargePaise = toPaise(parsed.service_charge  || 0);
+    const discountPaise      = toPaise(parsed.discount        || 0);
+    const tipPaise           = toPaise(parsed.tip             || 0);
+    const roundOffPaise      = toPaise(parsed.round_off       || 0);
 
-    // expected = subtotal + tax + service + tip + round_off - discount
     const recomputedPaise =
       subtotalPaise + taxPaise + serviceChargePaise + tipPaise + roundOffPaise - discountPaise;
 
     const extractedGrandTotalPaise = toPaise(parsed.grand_total || 0);
+    const diffPaise = Math.abs(recomputedPaise - extractedGrandTotalPaise);
 
-    // Determine which grand_total to use and whether a correction flag is needed.
     let finalGrandTotal = parsed.grand_total || 0;
     const correctionFlags: string[] = [];
 
-    // Tolerate up to 1 paise of floating-point drift; anything larger triggers correction.
-    if (Math.abs(recomputedPaise - extractedGrandTotalPaise) > 1) {
+    const fmt = (n: number) => {
+      const s = n.toFixed(2);
+      return s.endsWith('.00') ? s.slice(0, -3) : s;
+    };
+
+    if (diffPaise > 1 && diffPaise < 100) {
+      // Sub-rupee precision/truncation error — safe to auto-correct
       const recomputedRupees = recomputedPaise / 100;
-      // Format without trailing ".00" for clean display
-      const fmt = (n: number) => {
-        const s = n.toFixed(2);
-        return s.endsWith('.00') ? s.slice(0, -3) : s;
-      };
       correctionFlags.push(
         `Extracted grand total ₹${fmt(parsed.grand_total || 0)} did not match component arithmetic ` +
-        `(subtotal ₹${fmt((parsed.subtotal || 0))} + tax ₹${fmt((parsed.tax || 0))} ` +
-        `+ service ₹${fmt((parsed.service_charge || 0))} − discount ₹${fmt((parsed.discount || 0))} ` +
-        `+ round-off ₹${fmt((parsed.round_off || 0))} = ₹${fmt(recomputedRupees)}). ` +
+        `(subtotal ₹${fmt(parsed.subtotal || 0)} + tax ₹${fmt(parsed.tax || 0)} ` +
+        `+ service ₹${fmt(parsed.service_charge || 0)} − discount ₹${fmt(parsed.discount || 0)} ` +
+        `+ round-off ₹${fmt(parsed.round_off || 0)} = ₹${fmt(recomputedRupees)}). ` +
         `Grand total corrected to ₹${fmt(recomputedRupees)} by deterministic component arithmetic.`
       );
       finalGrandTotal = recomputedRupees;
+    } else if (diffPaise >= 100) {
+      // Large structural mismatch — preserve printed grand total, do NOT fabricate replacement
+      const recomputedRupees = recomputedPaise / 100;
+      correctionFlags.push(
+        `Sum of extracted receipt components (₹${fmt(recomputedRupees)}) differs from printed grand total ` +
+        `(₹${fmt(parsed.grand_total || 0)}). Preserving printed grand total.`
+      );
     }
 
     const receiptData: ReceiptData & { _extractionFlags?: string[] } = {
